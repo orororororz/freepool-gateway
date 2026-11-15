@@ -1,0 +1,36 @@
+# freepool-gateway — Docker Compose
+#
+# 部署位置：/vol1/@team/Docker/freepool-gateway
+#
+# 设计要点：
+#   · **不使用 1panel-network**，本服务跑在 compose 自建的独立网络里，
+#     与 1Panel 管理的其它容器网络隔离。
+#   · 因此中继端口必须发布到宿主机，容器外的客户端才能访问：
+#       宿主机地址：http://192.168.1.5:18901
+#       或 docker 网桥：http://172.17.0.1:18901
+#   · 数据落在 ./data（含密钥、模型清单缓存、用量统计），删容器不丢密钥。
+
+services:
+  freepool-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freepool-gateway:1.0.0
+    container_name: freepool-gateway
+    restart: unless-stopped
+    environment:
+      FP_HOME: /data
+      FP_LOCAL_PORT: "18900"
+      FP_RELAY_PORT: "18901"
+      FP_REFRESH_MINUTES: "15"
+    volumes:
+      - ./data:/data
+    ports:
+      # 发布到宿主机，供局域网内的客户端经网关地址访问。
+      # 中继本身用独立密钥鉴权；如需限制来源，在防火墙层限制 18901。
+      - "18901:18901"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

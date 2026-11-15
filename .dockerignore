@@ -1,0 +1,17 @@
+# 本项目的构建上下文需要：server.mjs / list-models.mjs / package.json /
+# src/ 与 Dockerfile。
+#
+# src/ 是推理核心源码，随仓库分发。
+.git
+.gitignore
+*.md
+!README.md
+node_modules
+npm-debug.log*
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yml
+build.log
+data
+.claude

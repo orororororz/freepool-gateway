@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# freepool-gateway — 「复用已有 Bun 镜像」构建变体
+#
+# 适用场景：你的 NAS / 服务器上**已经有**一个含 Bun 的镜像（`oven/bun` 官方镜像，
+# 或任何基于 Alpine 且带 bun 二进制自建的镜像），不想再让构建过程去下载一遍。
+#
+# 与主 Dockerfile 的区别只有一点：Bun 不做网上下载，而是**从已有镜像里 COPY
+# 二进制**。源码同样直接取自构建上下文（同目录下的 package.json / src），
+# 所以这个 Dockerfile **整个构建过程不需要联网**。
+#
+# 构建：
+#   docker build -f Dockerfile.reuse-bun -t freepool-gateway:1.0.0 .
+#
+# 指定你自己的镜像（不写就用官方 alpine 变体）：
+#   docker build -f Dockerfile.reuse-bun \
+#     --build-arg BUN_IMAGE=my-bun:local \
+#     -t freepool-gateway:1.0.0 .
+#
+# ── 三个必须匹配的条件 ───────────────────────────────────────────────────
+# 1. **架构**：NAS 是 x86_64 还是 arm64，镜像必须同架构。官方 oven/bun 是多架构
+#    的，一般不用管；自建镜像要留意。
+# 2. **libc**：本镜像运行时基于 `node:24-alpine`，是 **musl**。所以 Bun 也必须
+#    是 musl 构建 —— 只能用 `oven/bun:*alpine*` 系列。用 `oven/bun:1`（Debian，
+#    glibc）或 `oven/bun:slim` 里的二进制会直接报 "not found" 或 loader 错误。
+# 3. **二进制路径**：官方镜像里是 `/usr/local/bin/bun`。自建镜像如果放在别处
+#    （比如 `/root/.bun/bin/bun`），改下面的 COPY 源路径。
+#
+# ⚠️ 不要用「运行时挂载宿主机的 bun 二进制」这条路：NAS 宿主机（群晖 / QNAP /
+#    Unraid）基本都是 glibc 发行版，挂进 Alpine 容器跑不起来。宿主的 bun 只有
+#    在 glibc 容器里才能用。
+#
+# ─────────────────────────────────────────────────────────────────────────
+# 阶段一：从已有镜像里取 Bun
+# ─────────────────────────────────────────────────────────────────────────
+# 如果你的机器上已经 pull 过这个镜像，这一步完全离线。
+# 必须是 alpine（musl）变体，原因见文件头第 2 条。
+ARG BUN_IMAGE=oven/bun:1.4.4-alpine
+FROM ${BUN_IMAGE} AS bunbin
+
+# ─────────────────────────────────────────────────────────────────────────
+# 阶段二：运行时镜像
+# ─────────────────────────────────────────────────────────────────────────
+FROM node:24-alpine
+
+# tini 转发信号；libstdc++ / libgcc 是 bun 在 musl 下的运行时依赖。
+# node:alpine 通常已经带了这两个，这里显式声明一次，避免换基础镜像时静静失效。
+RUN apk add --no-cache tini libstdc++ libgcc
+
+# 从已有镜像复制 bun。**不下载、不联网、不装 npm 包。**
+COPY --from=bunbin /usr/local/bin/bun /usr/local/bin/bun
+
+# 强制验证：架构或 libc 不匹配时，让构建在这里失败，而不是等第一个推理请求。
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/bun; \
+    bun --version
+
+WORKDIR /app
+
+# package.json 必须带：src/ 下没有自己的 package.json，
+# 根部的 "type": "module" 决定了 src/*.js 按 ESM 解析。少了它直接崩。
+COPY package.json ./package.json
+COPY src ./src
+COPY server.mjs ./server.mjs
+COPY list-models.mjs ./list-models.mjs
+
+# 启动前自检：确认整形层依赖的两个官方资产在位（缺了会静默降级成空提示，
+# 那样每个请求都会被免费池 429，很难排查）。
+RUN set -eux; \
+    test -f /app/src/core/runtime.js; \
+    test -f /app/src/forward.js; \
+    test -f /app/src/o2a.js; \
+    test -f /app/src/o2a/assets/opencode_tools.json; \
+    test -f /app/src/o2a/assets/opencode_prompt_v2.txt
+
+RUN mkdir -p /data && chown -R node:node /data /app
+
+ENV NODE_ENV=production \
+    FP_HOME=/data \
+    FP_LOCAL_PORT=18900 \
+    FP_RELAY_PORT=18901 \
+    FP_REFRESH_MINUTES=15 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+EXPOSE 18901
+
+VOLUME ["/data"]
+
+USER node
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${FP_LOCAL_PORT}/health" >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.mjs"]
